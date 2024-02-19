@@ -18,7 +18,7 @@ class Events(object):
         self.width = width
         self.height = height
 
-def read_dataset(filename):
+def read_event(filename):
     """Reads in the TD events contained in the N-MNIST/N-CALTECH101 dataset file specified by 'filename'"""
     f = open(filename, 'rb')
     raw_data = np.fromfile(f, dtype=np.uint8)

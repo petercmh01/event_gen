@@ -60,7 +60,7 @@ class CNNEncoder(nn.Module):
     output: embedding of every pixels
     """
     self.conv_blocks_in = nn.Sequential(
-        nn.Conv2d(4, 16, 3, 1, 1),
+        nn.Conv2d(3, 16, 3, 1, 1), #input 3 for single image, 4 for video frames
         nn.BatchNorm2d(16),
         nn.ReLU(),
         nn.Conv2d(16, 32, 3, 1, 1),
@@ -80,11 +80,11 @@ class CNNEncoder(nn.Module):
     x = x.reshape(batch_size, h*w, num_feat_map)
     return x
 
-class EventPainter():
+class EventPainter(nn.Module):
   def __init__(self, hidden_dim = 64, n_heads=8, n_enc_layers = 3, n_dec_layers=3, max_n_events = 512, feat_map_h = 34, feat_map_w = 34):
       super().__init__()
       """
-      required input for class:
+      check:
       feature map width and height
       """
       self.query_pos = nn.Parameter(torch.rand(max_n_events, hidden_dim)) #to consider: use learnable or fixed?
