@@ -4,11 +4,12 @@ import torch.nn as nn
 import torch.nn.functional as F
 from matplotlib import pyplot as plt
 import cv2
-from model import HistPredictor, CNNEncoder, EventPainter
+from model import HistPredictor, CNNEncoder, EventPainter,Transformer,ModelPos,ModelP,ModelT
 from event_reading import read_event
 import torchvision.transforms as transforms
 import os
 import random
+from tqdm import tqdm
 
 def modify_file_name(file_path):
     nr = int(file_path.split('.')[0])
@@ -29,20 +30,33 @@ def event2histogram(event_stream):
 def event2histogram_alt(event_stream):
     event_stream = event_stream.numpy()
     hist = np.zeros((2, 34, 34))
-    xx = (event_stream[:,0]*33).astype(int)
-    yy= (event_stream[:,1]*33).astype(int)
-    pp = (event_stream[:,2]).astype(int)
-    pp[pp==1] = 0
-    np.add.at(hist, (pp, xx, yy), 1)
+    xx = np.floor((event_stream[:,0]*33)).astype(int)
+    yy= np.floor((event_stream[:,1]*33)).astype(int)
+    pp = np.floor((event_stream[:,2])).astype(int)
+    
+    ii = np.where(pp == 2)
+    if len(ii[0]) > 0 :
+      np.add.at(hist, (pp[:ii[0][0]], yy[:ii[0][0]], xx[:ii[0][0]]), 1)
+    else:
+      np.add.at(hist, (pp, yy, xx), 1)
     return hist
 
-def create_loader(N_MNIST_dir, MNIST_dir,seed,batchsize,max_n_events,split):
+def pad_N_MIST(N_MNIST,max_n_events):
+  new_N_mist = np.zeros((max_n_events,4))
+  new_N_mist[:,2] = 2
+
+  ii = N_MNIST.shape[0] 
+  new_N_mist[:ii ,:] = N_MNIST
+  return new_N_mist
+  
+def create_loader(N_MNIST_dir, MNIST_dir,seed,batchsize,min_n_events, max_n_events,split):
   grayscale_transform = transforms.Grayscale()
   class_path_list = os.listdir(N_MNIST_dir)
   N_MNIST_list = []
   MNIST_list = []
   inputmap_list = []
   label_list = []
+  nEvent_list = []
   for class_path in class_path_list:
       N_MNIST_class_path = os.path.join(N_MNIST_dir, class_path)
       MNIST_class_path = os.path.join(MNIST_dir, class_path)
@@ -50,11 +64,12 @@ def create_loader(N_MNIST_dir, MNIST_dir,seed,batchsize,max_n_events,split):
       for file_path in file_path_list:        
           N_MNIST_file_path = os.path.join(N_MNIST_class_path, file_path)
           N_MNIST = read_event(N_MNIST_file_path)
-          if N_MNIST.shape[0] < max_n_events:
+          nEvent_list.append(N_MNIST.shape[0])
+          if N_MNIST.shape[0] < min_n_events or N_MNIST.shape[0] > max_n_events:
               1
               #print(f"ERROR: {N_MNIST_file_path}")
               continue
-          N_MNIST = N_MNIST[:max_n_events]
+          N_MNIST = pad_N_MIST(N_MNIST,max_n_events)
           N_MNIST = torch.tensor(N_MNIST).to(torch.float32)
           N_MNIST_list.append(N_MNIST)
 
@@ -69,6 +84,7 @@ def create_loader(N_MNIST_dir, MNIST_dir,seed,batchsize,max_n_events,split):
           inputmap_list.append(input_map)
 
           label_list.append(int(class_path))
+  np.save('nEventList.npy', nEvent_list)
   merged_data = list(zip(N_MNIST_list, MNIST_list, inputmap_list, label_list))
   random.seed(seed)
   random.shuffle(merged_data)
@@ -118,86 +134,19 @@ def view_loader(data_loader):
       plt.title(data[-1])
       plt.show()
 
-'''
-# load some event stream
-# 写read event的时候只load了saccade1的event，目前还没考虑换了方向的运动
-# 完整的data loader也没写）
-event4 = read_event('./N_MNIST_small_training/4/00003.bin')
-event7 = read_event('./N_MNIST_small_training/7/00030.bin')
-event8 = read_event('./N_MNIST_small_training/8/00018.bin')
-
-# cat event stream data; 960 event for each for now (3, 960,4)
-event_stream_data = np.stack((event4[:960], event7[:960], event8[:960]))
-
-# load the corrsonding images and upsample them to the same dimensions of event stream (34*34);
-# matching: index - 1
-img4 = cv2.imread('./MNIST_img_small_training/4/2.jpg')
-img7 = cv2.imread('./MNIST_img_small_training/7/29.jpg')
-img8 = cv2.imread('./MNIST_img_small_training/8/17.jpg')
-
-img4 = cv2.resize(img4, (34, 34), interpolation=cv2.INTER_LINEAR)/255 #normalize to 0-1 after resize
-img7 = cv2.resize(img7, (34, 34), interpolation=cv2.INTER_LINEAR)/255
-img8 = cv2.resize(img8, (34, 34), interpolation=cv2.INTER_LINEAR)/255
-
-img_data = np.stack((img4, img7, img8))
-
-
-# get some event histogram (960 events for now)
-hist = np.zeros((2, 34, 34))
-list_hist = []
-
-for event_stream in event_stream_data:
-  for event in event_stream:
-    x = (33*event[0]).astype(int)
-    y = (33*event[1]).astype(int)
-    if event[2] == 1:
-      hist[0, y, x] += 1
-    else:
-      hist[1, y, x] += 1
-  list_hist.append(hist)
-  hist = np.zeros((2, 34, 34))
-
-list_hist = np.array(list_hist)
-
-
-# load data -> tensor
-
-event_stream_data = torch.tensor(event_stream_data).to(torch.float32) #[N,NEvent,4]
-event_histogram_data = torch.tensor(list_hist).to(torch.float32)
-img_data = torch.tensor(img_data)
-img_data = img_data.permute(0,3,1,2)  #[N,H,W.C] - > #[N,C,H,W]
-grayscale_transform = transforms.Grayscale()
-img_data = grayscale_transform(torch.Tensor(img_data))
-input_maps = torch.cat((img_data, event_histogram_data), dim=1).to(torch.float32)
-
-#plt.imshow(list_hist[1][0], cmap='magma')
-#plt.show()
-
-'''
-
-def train():   
+def train():  
+  #SMALL
   N_MNIST_path = "./N_MNIST_small_training"
   MNIST_path = "./MNIST_img_small_training"
   batchsize = 32
-  max_n_events = 960
+  min_n_events = 100
+  max_n_events = 390
   seed = 42
-  train_data_loader,test_data_loader = create_loader(N_MNIST_path,MNIST_path,seed,batchsize,max_n_events,split=True)
+  train_data_loader, test_data_loader= create_loader(N_MNIST_path,MNIST_path,seed,batchsize,min_n_events,max_n_events,split=True)
   print(f"train_data_loader_size: {len(train_data_loader)*batchsize}")
   print(f"test_data_loader_size: {len(test_data_loader)*batchsize}")
 
-
-  '''
-  N_MNIST_train_path = "./NMNIST_Train/Train"
-  MNIST_train_path = "./MNIST_Train"
-  N_MNIST_test_path = "./NMNIST_Test/Test"
-  MNIST_test_path = "./MNIST_Test"
-  batchsize = 16
-  train_data_loader = create_loader(N_MNIST_train_path,MNIST_train_path,batchsize,split=False)
-  test_data_loader = create_loader(N_MNIST_test_path,MNIST_test_path,batchsize,split=False)
-  print(f"train_data_loader_size: {len(train_data_loader)*batchsize}")
-  print(f"test_data_loader_size: {len(test_data_loader)*batchsize}")
-  '''
-
+  
   #view_loader(train_data_loader)
 
   # init models
@@ -218,24 +167,156 @@ def train():
   test_loss_list = []
 
   min_loss = 99999
-  for epoch in range(200):
-    for [N_MNIS, MNIST, input_maps, label] in train_data_loader:    
-      x_maps = input_maps.to(device)
-      y_event = N_MNIS.to(device)
+  for epoch in range(10000):
+    #pbar_training = tqdm(total= (train_data_loader.batch_size*len(train_data_loader)) + (test_data_loader.batch_size*len(test_data_loader)))    
+    avg_train_loss = np.array([0.,0.,0.])
+    for [N_MNIST, MNIST, input_maps, label] in train_data_loader:    
+      x_maps = MNIST.to(device)
+      y_event = N_MNIST.to(device)
       vis_feat = cnn_encoder(x_maps)
       predict_event = event_painter(vis_feat)
+
       loss_xy = loss_spatial(predict_event[:,:,:2], y_event[:,:,:2])
+
+      std_loss_x = torch.abs(torch.std(N_MNIST[:,:,0])-torch.std(predict_event[:,:,0]))
+      std_loss_y = torch.abs(torch.std(N_MNIST[:,:,1])-torch.std(predict_event[:,:,1]))
+      loss_xy2 = std_loss_x + std_loss_y
+
       loss_p = loss_polarity(predict_event[:,:,2], y_event[:,:,2])
       loss_t = loss_time(predict_event[:,:,3], y_event[:,:,3])
+      loss_event_train =  loss_xy + loss_xy2/5
+      loss_event_train.backward()
+      optimizer.step()
+      optimizer.zero_grad()
+      #pbar_training.update(train_data_loader.batch_size)
+      avg_train_loss += np.round([loss_event_train.item()/len(train_data_loader), loss_p.item()/len(train_data_loader), loss_t.item()/len(train_data_loader)],4)
+
+
+    with torch.no_grad():
+      avg_test_loss = np.array([0.,0.,0.])
+      for [N_MNIST, MNIST, input_maps, label] in test_data_loader:    
+        x_maps = MNIST.to(device)
+        y_event = N_MNIST.to(device)
+        vis_feat = cnn_encoder(x_maps)
+        predict_event = event_painter(vis_feat)
+        loss_xy = loss_spatial(predict_event[:,:,:2], y_event[:,:,:2])
+
+        std_loss_x = torch.abs(torch.std(N_MNIST[:,:,0])-torch.std(predict_event[:,:,0]))
+        std_loss_y = torch.abs(torch.std(N_MNIST[:,:,1])-torch.std(predict_event[:,:,1]))
+        loss_xy2 = std_loss_x + std_loss_y
+      
+        loss_p = loss_polarity(predict_event[:,:,2], y_event[:,:,2])
+        loss_t = loss_time(predict_event[:,:,3], y_event[:,:,3])
+        loss_event_train =  loss_xy + loss_xy2/5
+        #pbar_training.update(test_data_loader.batch_size)
+        avg_test_loss += np.round([loss_event_train.item()+loss_xy2.item()/len(train_data_loader), loss_p.item()/len(train_data_loader), loss_t.item()/len(train_data_loader)],4)
+
+
+    train_loss_list.append(avg_train_loss)
+    test_loss_list.append(avg_test_loss)
+    if (avg_train_loss[0]) < min_loss:
+      torch.save(cnn_encoder.state_dict(), "cnn_encoder.pt")
+      torch.save(event_painter.state_dict(), "event_painter.pt")
+      min_loss = avg_train_loss[0]
+    #pbar_training.close()
+    print("epoch:", epoch,"loss_train:",avg_train_loss,"loss_test:",avg_test_loss,"loss_sum:",min_loss) #,"loss histogram:",loss_histogram.item())\
+
+    np.save("loss_list.npy",[train_loss_list, test_loss_list])
+
+
+def train_multimodel():  
+  #TINY
+
+  N_MNIST_path = "./N_MNIST_tiny_training"
+  MNIST_path = "./MNIST_img_tiny_training"
+  batchsize = 3
+  max_n_events = 960
+  seed = 42
+  train_data_loader = create_loader(N_MNIST_path,MNIST_path,seed,batchsize,max_n_events,split=False)
+  test_data_loader = create_loader(N_MNIST_path,MNIST_path,seed,batchsize,max_n_events,split=False)
+  print(f"train_data_loader_size: {len(train_data_loader)*batchsize}")
+  print(f"test_data_loader_size: {len(test_data_loader)*batchsize}")
+  '''
+ 
+
+  #SMALL
+ 
+  N_MNIST_path = "./N_MNIST_small_training"
+  MNIST_path = "./MNIST_img_small_training"
+  batchsize = 32
+  max_n_events = 960
+  seed = 42
+  train_data_loader, test_data_loader= create_loader(N_MNIST_path,MNIST_path,seed,batchsize,max_n_events,split=True)
+  print(f"train_data_loader_size: {len(train_data_loader)*batchsize}")
+  print(f"test_data_loader_size: {len(test_data_loader)*batchsize}")
+  '''
+  '''
+
+  #BIG
+  N_MNIST_train_path = "./NMNIST_Train"
+  MNIST_train_path = "./MNIST_Train"
+  N_MNIST_test_path = "./NMNIST_Test"
+  MNIST_test_path = "./MNIST_Test"
+  batchsize = 32
+  max_n_events = 960
+  seed = 42
+  train_data_loader = create_loader(N_MNIST_train_path,MNIST_train_path,seed,batchsize,  max_n_events,split=False)
+  test_data_loader = create_loader(N_MNIST_test_path,MNIST_test_path,seed,batchsize,  max_n_events,split=False)
+  print(f"train_data_loader_size: {len(train_data_loader)*batchsize}")
+  print(f"test_data_loader_size: {len(test_data_loader)*batchsize}")
+ '''
+  #view_loader(train_data_loader)
+
+  # init models
+  device = torch.device("cuda:0") if torch.cuda.is_available() else torch.device("cpu")
+  print("cuda: "+ str(torch.cuda.is_available()))
+
+  cnn_encoder = CNNEncoder().to(device)
+  event_painter = Transformer(max_n_events = max_n_events).to(device)
+  modelPos = ModelPos().to(device)
+  modelP = ModelP().to(device)
+  modelT = ModelT().to(device)
+  
+  # init optimizer and loss
+  params = list(cnn_encoder.parameters()) + list(event_painter.parameters()) + list(modelPos.parameters()) + list(modelP.parameters()) + list(modelT.parameters())
+  optimizer = torch.optim.Adam(params, lr=0.0001)
+  loss_spatial = nn.MSELoss()
+  loss_time = nn.MSELoss()
+  #loss_polarity = nn.MSELoss()
+  loss_polarity = nn.CrossEntropyLoss()
+
+  train_loss_list = []
+  test_loss_list = []
+
+  min_loss = 99999
+  for epoch in range(30000):
+    pbar_training = tqdm(total= (train_data_loader.batch_size*len(train_data_loader)) + (test_data_loader.batch_size*len(test_data_loader)))    
+    avg_train_loss = np.array([0.,0.,0.])
+    for [N_MNIS, MNIST, input_maps, label] in train_data_loader:    
+      x_maps = MNIST.to(device)
+      y_event = N_MNIS.to(device)
+      vis_feat = cnn_encoder(x_maps)
+      vis_feat = event_painter(vis_feat)
+      predict_pos = modelPos(vis_feat)
+      predict_p = modelP(vis_feat)
+      predict_t = modelT(vis_feat)
+
+      loss_xy = loss_spatial(predict_pos, y_event[:,:,:2])
+      label_onehot = F.one_hot(y_event[:,:,2].to(torch.int64), 2).float()
+      loss_p = loss_polarity(predict_p, label_onehot)
+      loss_t = loss_time(predict_t[:,:,0], y_event[:,:,3])
+
       loss_event_train = loss_xy + loss_p + loss_t
       loss_event_train.backward()
       optimizer.step()
       optimizer.zero_grad()
-      #List.append(loss_event.item())
+      pbar_training.update(train_data_loader.batch_size)
+      avg_train_loss += np.round([loss_xy.item()/len(train_data_loader), loss_p.item()/len(train_data_loader), loss_t.item()/len(train_data_loader)],4)
 
     with torch.no_grad():
+      avg_test_loss = np.array([0.,0.,0.])
       for [N_MNIS, MNIST, input_maps, label] in test_data_loader:    
-        x_maps = input_maps.to(device)
+        x_maps = MNIST.to(device)
         y_event = N_MNIS.to(device)
         vis_feat = cnn_encoder(x_maps)
         predict_event = event_painter(vis_feat)
@@ -243,27 +324,30 @@ def train():
         loss_p = loss_polarity(predict_event[:,:,2], y_event[:,:,2])
         loss_t = loss_time(predict_event[:,:,3], y_event[:,:,3])
         loss_event_test = loss_xy + loss_p + loss_t
-    
-    train_loss_list.append(loss_event_train.item())
-    test_loss_list.append(loss_event_test.item())
-    if loss_event_test.item() < min_loss:
+        pbar_training.update(test_data_loader.batch_size)
+        avg_test_loss += np.round([loss_xy.item()/len(train_data_loader), loss_p.item()/len(train_data_loader), loss_t.item()/len(train_data_loader)],4)
+
+    train_loss_list.append(avg_train_loss)
+    test_loss_list.append(avg_test_loss)
+    if sum(avg_test_loss) < min_loss:
       torch.save(cnn_encoder.state_dict(), "cnn_encoder.pt")
       torch.save(event_painter.state_dict(), "event_painter.pt")
-      min_loss = loss_event_test.item()
-    print("epoch:", epoch,"loss_train:",loss_event_train.item(),"loss_test:",loss_event_test.item(),"loss_min:",min_loss) #,"loss histogram:",loss_histogram.item())
-  print("train_loss_list=")
-  print(train_loss_list)
-  print("test_loss_list=")
-  print(test_loss_list)
+      min_loss = sum(avg_test_loss)
+    pbar_training.close()
+    print("epoch:", epoch,"loss_train:",avg_train_loss,"loss_test:",avg_test_loss,"loss_sum:",min_loss) #,"loss histogram:",loss_histogram.item())\
+
+    np.save("loss_list.npy",[train_loss_list, test_loss_list])
 
 def test():   
   N_MNIST_path = "./N_MNIST_small_training"
   MNIST_path = "./MNIST_img_small_training"
+
   batchsize = 32
-  max_n_events = 960
+  min_n_events = 100
+  max_n_events = 390
   seed = 42
-  train_data_loader,test_data_loader = create_loader(N_MNIST_path,MNIST_path,seed,batchsize,max_n_events,split=True)
-  print(f"train_data_loader_size: {len(train_data_loader)*batchsize}")
+  train_data_loader, test_data_loader= create_loader(N_MNIST_path,MNIST_path,seed,batchsize,min_n_events,max_n_events,split=True)
+
   print(f"test_data_loader_size: {len(test_data_loader)*batchsize}")
 
   # init models
@@ -272,41 +356,98 @@ def test():
   cnn_encoder.load_state_dict(torch.load("cnn_encoder.pt"))
   event_painter.load_state_dict(torch.load("event_painter.pt"))
   
-  plt.subplot(2,2,1)
   with torch.no_grad():
-    index = random.randint(0,len(train_data_loader.dataset)-1)
-    [y_event, MNIST, input_maps, label] = train_data_loader.dataset[index]
-    x_maps = input_maps.reshape(1,input_maps.shape[0],input_maps.shape[1],input_maps.shape[2])
+    index = random.randint(0,len(test_data_loader.dataset)-1)
+    index = 1
+    print(f"index:{index}")
+    [y_event, MNIST, input_maps, label] = test_data_loader.dataset[index]
+    x_maps = MNIST.reshape(1,MNIST.shape[0],MNIST.shape[1],MNIST.shape[2])
     vis_feat = cnn_encoder(x_maps)
     predict_event = event_painter(vis_feat)
+    predict_event[0,:,2] = torch.round(predict_event[0,:,2])
+    np.save("y_event.npy",y_event.numpy())
+    np.save("predict_event.npy",predict_event.numpy())
 
-  plt.plot(y_event[:,3]*100000, label="Real Events Timestamps")
-  plt.plot(predict_event[0,:,3]*100000, alpha=0.6,label="Geneated Events Timestamps")
-  plt.title("Train:Event Timestamp (y, in μs) vs. Event Index (x)")
+  plt.subplot(2,2,1)
+  plt.plot(y_event[:,0]*33, label="Real")
+  plt.plot(predict_event[0,:,0]*33, alpha=0.6,label="Geneated")
+  plt.title("x")
   plt.legend()
 
   plt.subplot(2,2,2)
+  plt.plot(y_event[:,1]*33, label="Real")
+  plt.plot(predict_event[0,:,1]*33, alpha=0.6,label="Geneated")
+  plt.title("y")
+  plt.legend()
+
+  plt.subplot(2,2,3)
+  plt.plot(y_event[:,2], '.',label="Real")
+
+  ii = np.where(predict_event[0,:,2] == 2)
+  acc = sum(predict_event[0,:,2] == y_event[:,2])/len(y_event[:,2])
+  acc = np.round(acc.item(),4)
+  if len(ii[0]) > 0 :
+    acc1 = sum(predict_event[0,:ii[0][0],2] == y_event[:ii[0][0],2])/len(y_event[:,2])
+    acc1 = np.round(acc1.item(),4)
+  else:
+    acc1 = acc
+
+  #print((predict_event[0,:,0]*33))
+
+  plt.plot(predict_event[0,:,2], '.',alpha=0.6,label="Geneated")
+  print(acc1)
+  print(acc)
+  plt.title(f"p: acc = {acc}, acc1 = {acc1}")
+  plt.legend()
+
+  plt.subplot(2,2,4)
+  plt.plot(y_event[:,3], label="Real")
+  plt.plot(predict_event[0,:,3], alpha=0.6,label="Geneated")
+  plt.title("Timestamp")
+  plt.legend()
+
+  plt.tight_layout()
+  plt.savefig('parameter.png')
+  plt.figure().clear()
+
+  plt.subplot(1,3,1)
+  histogram_alt = event2histogram_alt(predict_event[0])
   image = np.zeros((34, 34, 3)) 
-  histogram = np.transpose(event2histogram(predict_event), (1, 2, 0))
+  histogram = np.transpose(histogram_alt, (1, 2, 0))
   image[:,:,0:2] = histogram
   plt.imshow(image, cmap='magma')
-  
-  plt.subplot(2,2,3)
-  with torch.no_grad():
-    index = random.randint(0,len(test_data_loader.dataset)-1)
-    [y_event, MNIST, input_maps, label] = train_data_loader.dataset[index]
-    x_maps = input_maps.reshape(1,input_maps.shape[0],input_maps.shape[1],input_maps.shape[2])
-    vis_feat = cnn_encoder(x_maps)
-    predict_event = event_painter(vis_feat)
+  plt.title("Generated_alt")
 
-  plt.plot(y_event[:,3]*100000, label="Real Events Timestamps")
-  plt.plot(predict_event[0,:,3]*100000, alpha=0.6,label="Geneated Events Timestamps")
-  plt.title("Test:Event Timestamp (y, in μs) vs. Event Index (x)")
+  plt.subplot(1,3,2)
+  histogram = event2histogram_alt(y_event)
+  image = np.zeros((34, 34, 3)) 
+  histogram = np.transpose(histogram, (1, 2, 0))
+  image[:,:,0:2] = histogram
+  plt.imshow(image, cmap='magma')
+  plt.title("Real")
+
+  plt.subplot(1,3,3)
+  plt.imshow(MNIST[0], cmap='magma')
+  plt.title("MNIST")
+
+  plt.tight_layout()
+  plt.savefig('histogram.png')
+  plt.figure().clear()
+
+  train_loss_list = np.load("loss_list.npy")
+  plt.plot(train_loss_list[0,:,0],label = 'xy')
+  #plt.plot(train_loss_list[0,:,1],label = 'p')
+  #plt.plot(train_loss_list[0,:,2],label = 't')
+
+  #plt.xlim([0,600])
   plt.legend()
-  plt.show()
+  plt.tight_layout()
+  plt.savefig('loss.png')
+
 
 
 if __name__ == "__main__":
+  #train()
   test()
   
 

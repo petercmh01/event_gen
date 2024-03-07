@@ -48,10 +48,11 @@ def read_event(filename):
     td.data.p = all_p[td_indices]
 
     #further processing for event generation tasks
+    #saccades1 = td.data[np.logical_and(0 < td.data['ts'], td.data['ts'] < 100000)] #select the first saccades
     saccades1 = td.data[np.logical_and(60000 < td.data['ts'], td.data['ts'] < 70000)] #select the first saccades
     saccades1 = np.array(saccades1.tolist(), dtype=float) #transfer dtype
-    saccades1[:,3] = saccades1[:,3]/100000 #normalize time
+    saccades1[:,3] = saccades1[:,3]/10000 #normalize time
     saccades1[:,0] = saccades1[:,0]/33 #normalize coordinate
     saccades1[:,1] = saccades1[:,1]/33
-    saccades1[:,2][saccades1[:,2]==0] = -1 #convert polarity 0 to -1
+    #saccades1[:,2][saccades1[:,2]==0] = -1 #convert polarity 0 to -1
     return saccades1
